@@ -1,0 +1,19 @@
+host: 127.0.0.1
+port: 8000
+backend:
+  name: dreamlabs
+  options:
+    # The model on Dream Labs' API. The API key comes from DREAM_API_KEY or ~/.dreamlabs/credentials.
+    checkpoint: dreamlabs/dream-1-beta
+models:
+  # The fields below must match the model as registered with the Router.
+  - name: dream-1
+    model_type: vla
+    url: https://huggingface.co/dreamlabs/dream-1
+    revision: "0000000000000000000000000000000000000000"
+    action_space: joint_position
+    action_dim: 14
+    control_hz: 30
+    max_horizon: 30
+    # Unused: the model runs on Dream Labs' API, not a local service.
+    endpoint: ws://127.0.0.1:8000
