@@ -203,10 +203,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
-dreamlabs = [
-    { name = "dreamlabs-client" },
-    { name = "opencv-python" },
-]
 droid = [
     { name = "msgpack" },
     { name = "pyzmq" },
@@ -218,14 +214,12 @@ droid = [
 [package.metadata]
 requires-dist = [
     { name = "async-timeout", marker = "python_full_version < '3.11'", specifier = ">=4,<6" },
-    { name = "dreamlabs-client", marker = "extra == 'dreamlabs'", specifier = "==1.0.14" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.66" },
     { name = "inspect-robots", marker = "extra == 'agent'", git = "https://github.com/supernoooo/inspect-robots.git?rev=22a4da62776575723c0d6285315fc32cdc0cddf5" },
     { name = "inspect-robots-agent", marker = "extra == 'agent'", git = "https://github.com/supernoooo/inspect-robots.git?subdirectory=plugins%2Finspect-robots-agent&rev=22a4da62776575723c0d6285315fc32cdc0cddf5" },
     { name = "msgpack", marker = "extra == 'droid'", specifier = ">=1,<2" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python", marker = "extra == 'demo'", specifier = ">=4.10,<5" },
-    { name = "opencv-python", marker = "extra == 'dreamlabs'", specifier = ">=4.10,<5" },
     { name = "protobuf", specifier = ">=6.33.5,<7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
@@ -234,21 +228,7 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'droid'", specifier = ">=1.10,<2" },
     { name = "websockets", specifier = ">=15,<16" },
 ]
-provides-extras = ["dev", "demo", "droid", "dreamlabs", "agent"]
-
-[[package]]
-name = "dreamlabs-client"
-version = "1.0.14"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "websockets" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/e0/5a5a37a5eab98dacf4c771a0eb113f9a88878377eaef195de8d60c39fcbc/dreamlabs_client-1.0.14-py3-none-any.whl", hash = "sha256:deeaea8063cac2a63a13c0814389b8316944647c3520017ece86c654500802cb", size = 458485, upload-time = "2026-10-29T20:50:36.589Z" },
-]
+provides-extras = ["dev", "demo", "droid", "agent"]
 
 [[package]]
 name = "exceptiongroup"

@@ -19,7 +19,6 @@ dependencies = [
 dev = ["grpcio-tools>=1.66", "pytest>=8", "pytest-asyncio>=0.24"]
 demo = ["opencv-python>=4.10,<5"]
 droid = ["msgpack>=1,<2", "pyzmq>=25,<28", "scipy>=1.10,<2"]
-dreamlabs = ["dreamlabs-client==1.0.14", "opencv-python>=4.10,<5"]
 agent = [
   "inspect-robots @ git+https://github.com/supernoooo/inspect-robots.git@22a4da62776575723c0d6285315fc32cdc0cddf5",
   "inspect-robots-agent @ git+https://github.com/supernoooo/inspect-robots.git@22a4da62776575723c0d6285315fc32cdc0cddf5#subdirectory=plugins/inspect-robots-agent",

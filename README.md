@@ -85,7 +85,8 @@ Dream Labs models (`dreamlabs/dream-1-beta` on a bimanual YAM) run on Dream Labs
 `dreamlabs-client` library, so nothing runs on a local GPU:
 
 ```bash
-uv sync --extra dreamlabs
+uv sync --extra demo  # OpenCV, which encodes the camera frames
+uv pip install dreamlabs-client==1.0.14
 export DREAM_API_KEY=<your key>  # or put it in ~/.dreamlabs/credentials
 .venv/bin/colosseum-policy-local --config configs/local-runtime-yam-dreamlabs.yaml.example
 ```
