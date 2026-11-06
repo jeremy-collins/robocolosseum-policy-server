@@ -66,6 +66,17 @@ async def started(monkeypatch, fake):
     return backend
 
 
+def fake_clock(monkeypatch):
+    """Gives the backend a clock the test moves; returns the function that moves it, by seconds."""
+    now = [100.0]
+    monkeypatch.setattr(dreamlabs, 'time', types.SimpleNamespace(monotonic=lambda: now[0]))
+    return lambda seconds: now.__setitem__(0, now[0] + seconds)
+
+
+# The plan rows of a call's 3 loop steps at 30 Hz, from its first: 20 plan rows/s.
+STEP_ROWS = np.arange(3) * 20 / 30
+
+
 @pytest.mark.asyncio
 async def test_maps_client_order_to_dream_and_back(monkeypatch):
     fake = FakeDreamClient()
@@ -80,7 +91,7 @@ async def test_maps_client_order_to_dream_and_back(monkeypatch):
     assert state['state.arm_r.joint_pos'] == pytest.approx([.1] * 6) and state['state.arm_r.gripper_pos'] == [.75]
     assert state['prompt'] == 'stack the cups' and fake.commanded == [None]
     assert actions.shape == (3, 14)
-    assert actions[:, 0] == pytest.approx([1, 1.01, 1.02]) and actions[:, 7] == pytest.approx([2, 2.01, 2.02])
+    assert actions[:, 0] == pytest.approx(1 + STEP_ROWS / 100) and actions[:, 7] == pytest.approx(2 + STEP_ROWS / 100)
     assert actions[:, 6] == pytest.approx([.2] * 3) and actions[:, 13] == pytest.approx([1] * 3)  # 1.001 clipped
 
     await backend.end_session()
@@ -90,12 +101,30 @@ async def test_maps_client_order_to_dream_and_back(monkeypatch):
 @pytest.mark.asyncio
 async def test_next_chunk_takes_over_from_the_last_commanded_row(monkeypatch):
     fake = FakeDreamClient()
+    advance = fake_clock(monkeypatch)
     backend = await started(monkeypatch, fake)
-    for step in range(0, 51, 3):
+    for step in range(0, 72, 3):
         await backend.infer(model(), observation(step))
+        advance(0.1)
     await backend.end_session()  # waits for the request in flight
-    # The buffer falls to 3 rows after rows 0-44 run, so the second request carries row 44 as each arm's last command.
-    assert fake.commanded[1] == {'q_l_chunk': pytest.approx([1.44] * 6 + [.2]), 'q_r_chunk': pytest.approx([2.44] * 6 + [1])}
+    # Call 23 starts at plan row 46, 2 rows from the end, so the second request carries call 22's last target, plan
+    # row 44 + 4/3, as each arm's last command.
+    assert fake.commanded[1] == {'q_l_chunk': pytest.approx([1 + .44 + .04 / 3] * 6 + [.2]),
+                                 'q_r_chunk': pytest.approx([2 + .44 + .04 / 3] * 6 + [1])}
+
+
+@pytest.mark.asyncio
+async def test_plays_twenty_plan_rows_a_second_at_any_loop_rate(monkeypatch, capsys):
+    fake = FakeDreamClient()
+    advance = fake_clock(monkeypatch)
+    backend = await started(monkeypatch, fake)
+    played = []
+    for step in range(0, 30, 3):  # 1 s of a 30 Hz loop
+        played.append(await backend.infer(model(), observation(step)))
+        advance(0.1)
+    await backend.end_session()
+    assert np.concatenate(played)[:, 0] == pytest.approx(1 + np.arange(30) * 20 / 30 / 100)  # rows 0 to 19.3, in 1 s
+    assert '20.0 rows/s' in capsys.readouterr().out
 
 
 
@@ -104,11 +133,13 @@ async def test_next_chunk_takes_over_from_the_last_commanded_row(monkeypatch):
 async def test_requests_each_chunk_on_arrival_until_five_replies_while_sync(monkeypatch, mode, calls):
     fake = FakeDreamClient()
     fake.mode = mode
+    advance = fake_clock(monkeypatch)
     backend = await started(monkeypatch, fake)
-    for step in range(0, 30, 3):  # 30 rows: under the 45 that run before the buffer falls to 3
+    for step in range(0, 30, 3):  # 20 plan rows: under the 45 that play before the buffer falls to 3
         await backend.infer(model(), observation(step))
         if backend.refill is not None:
             await asyncio.wait({backend.refill})
+        advance(0.1)
     await backend.end_session()
     assert len(fake.commanded) == calls
 
@@ -133,7 +164,7 @@ async def test_first_call_holds_the_arms_and_keeps_the_reply_asked_for_after_the
     actions = await backend.infer(model(), observation(0))
     assert time.monotonic() - start >= 0.2  # no rows reach the arms during the hold
     assert len(calls) >= 4 and calls[-1] - start >= 0.2  # asked again meanwhile; the last asked after the hold
-    assert actions[:, 0] == pytest.approx([1 + len(calls), 1.01 + len(calls), 1.02 + len(calls)])  # the last reply
+    assert actions[:, 0] == pytest.approx(1 + STEP_ROWS / 100 + len(calls))  # the last reply
     second = time.monotonic()
     await backend.infer(model(), observation(3))
     assert time.monotonic() - second < 0.1  # later calls do not hold
