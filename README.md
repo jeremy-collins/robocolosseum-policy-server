@@ -91,9 +91,9 @@ export DREAM_API_KEY=<your key>  # or put it in ~/.dreamlabs/credentials
 ```
 
 The `dreamlabs` backend keeps the model's frame window and fetches the next action chunk while the arms play the
-current one, so each inference call returns 3 rows (0.1 s at 30 Hz) from a local buffer and only the first call of
-a trial waits on the network. Each trial is one model session, opened when the trial starts and closed when it
-ends. Camera frames are center-cropped to 16:9 for the model.
+current one, so each inference call returns 3 rows (0.1 s at 30 Hz), normally from a local buffer; a call waits on
+the network only when the next chunk has not arrived yet, as for the first call of a trial. Each trial is one model
+session, opened when the trial starts and closed when it ends. Camera frames are center-cropped to 16:9 for the model.
 
 ### Use a cloud LLM through Inspect Robots
 

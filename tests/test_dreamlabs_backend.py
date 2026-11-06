@@ -54,12 +54,17 @@ def observation(step):
     return obs
 
 
-@pytest.mark.asyncio
-async def test_maps_client_order_to_dream_and_back(monkeypatch):
-    fake = FakeDreamClient()
+async def started(monkeypatch, fake):
     monkeypatch.setitem(sys.modules, 'dream', types.SimpleNamespace(DreamClient=lambda: fake))
     backend = DreamLabsBackend({'checkpoint': 'dreamlabs/dream-1-beta'})
     await backend.start_session(model(), {})
+    return backend
+
+
+@pytest.mark.asyncio
+async def test_maps_client_order_to_dream_and_back(monkeypatch):
+    fake = FakeDreamClient()
+    backend = await started(monkeypatch, fake)
     actions = await backend.infer(model(), observation(0))
 
     frames, state = fake.observations[0]
@@ -80,11 +85,44 @@ async def test_maps_client_order_to_dream_and_back(monkeypatch):
 @pytest.mark.asyncio
 async def test_next_chunk_takes_over_from_the_last_commanded_row(monkeypatch):
     fake = FakeDreamClient()
-    monkeypatch.setitem(sys.modules, 'dream', types.SimpleNamespace(DreamClient=lambda: fake))
-    backend = DreamLabsBackend({'checkpoint': 'dreamlabs/dream-1-beta'})
-    await backend.start_session(model(), {})
+    backend = await started(monkeypatch, fake)
     for step in range(0, 51, 3):
         await backend.infer(model(), observation(step))
     await backend.end_session()  # waits for the request in flight
     # The buffer falls to 3 rows after rows 0-44 run, so the second request carries row 44 as each arm's last command.
     assert fake.commanded[1] == {'q_l_chunk': pytest.approx([1.44] * 6 + [.2]), 'q_r_chunk': pytest.approx([2.44] * 6 + [1])}
+
+
+def joints(values):
+    return lambda obs: obs.state['joint_position'].CopyFrom(tensor_from_numpy(np.asarray(values, np.float32)))
+
+
+@pytest.mark.parametrize('change, error', [
+    (lambda obs: obs.sensors.pop(), 'invalid RGB sensor right_image'),
+    (lambda obs: obs.sensors.add().CopyFrom(obs.sensors[0]), 'Duplicate camera'),
+    (joints(np.zeros(6)), 'invalid observation state joint_position'),
+    (joints(np.full(12, np.nan)), 'invalid observation state joint_position'),
+    (lambda obs: obs.state['gripper_position'].CopyFrom(tensor_from_numpy(np.array([.5, 1.5], np.float32))), 'grippers'),
+    (lambda obs: setattr(obs, 'instruction', ' '), 'instruction is empty'),
+])
+@pytest.mark.asyncio
+async def test_rejects_malformed_observations(monkeypatch, change, error):
+    fake = FakeDreamClient()
+    backend = await started(monkeypatch, fake)
+    obs = observation(0)
+    change(obs)
+    with pytest.raises(ValueError, match=error):
+        await backend.infer(model(), obs)
+    await backend.end_session()
+    assert fake.observations == [] and fake.commanded == []  # nothing reached the model
+
+
+@pytest.mark.asyncio
+async def test_rejects_non_finite_model_actions(monkeypatch):
+    fake = FakeDreamClient()
+    fake.get_action = lambda *, commanded=None: {'q_l_chunk': np.full((48, 7), np.nan), 'q_r_chunk': np.zeros((48, 7))}
+    backend = await started(monkeypatch, fake)
+    with pytest.raises(ValueError, match='non-finite'):
+        await backend.infer(model(), observation(0))
+    await backend.end_session()
+    assert fake.closed

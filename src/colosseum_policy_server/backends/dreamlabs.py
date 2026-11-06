@@ -2,8 +2,8 @@
 
 The Client sends one observation per inference call and plays the returned rows at 30 Hz. The dream client keeps
 the model's frame window (9 frames at 5 fps) and fetches the next action chunk in the background while the arms play
-the current one, so after the first chunk each call returns a few rows from a local buffer instead of waiting on
-the network. One trial is one model session: start_session() opens it and end_session() closes it.
+the current one, so a call normally returns a few rows from a local buffer and waits on the network only when the
+next chunk has not arrived yet. One trial is one model session: start_session() opens it and end_session() closes it.
 
 The API key is read by the dream client itself, from `DREAM_API_KEY` or `~/.dreamlabs/credentials`.
 """
