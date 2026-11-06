@@ -24,31 +24,23 @@ from .. import colosseum_pb2 as pb
 from ..model_adapters.bounds import check_bounds
 from ..model_adapters.observation import _rgb, _state
 
-# The Client's YAM control rate: loop steps per second.
 CONTROL_HZ = 30
-# The rate the model's rows are played at, as on Dream Labs' YAM stations: each row is the target 1/PLAN_HZ s after
-# the one before, and the stations ramp linearly from one row to the next, so a 48-row chunk lasts 2.4 s.
+# Model rows per second, as Dream Labs' YAM stations play them, ramping linearly from one row to the next.
 PLAN_HZ = 20
-# Targets returned per call. The Client sends its next observation only once these have run, so 3 steps at 30 Hz is
-# one observation every 0.1 s, twice the rate of the model's 5 fps frame window.
+# Targets per call: at 30 Hz, one observation every 0.1 s, twice the model's 5 fps frame window.
 ROWS_PER_CALL = 3
-# Plan time follows the wall clock while the arms play, but moves at most this much from one call to the next, so a
-# stalled Client resumes the plan where its arms stopped instead of jumping ahead.
+# The most plan time one call may add, so a stalled Client resumes the plan where its arms stopped.
 MAX_ADVANCE_S = 2 * ROWS_PER_CALL / CONTROL_HZ
-# The size the model sees; a camera of another shape is center-cropped to 16:9 first, never squished.
+# Frames are center-cropped to 16:9, never squished, then sized to FRAME_SIZE.
 FRAME_SIZE = (640, 360)
 JPEG_QUALITY = 85
-# Client camera -> the model's camera: the head camera and the left and right wrist cameras.
 CAMERAS = {"head_image": "top", "left_image": "left", "right_image": "right"}
-# The dream client decides between fetching ahead and waiting for each chunk to run out from the median of its last
-# five round trips, and a session's first round trip is slow (the model opens the session). Until this many replies
-# have outvoted it, the next chunk is requested as soon as one lands, but never sooner than WARMUP_GAP_S after the
-# last request: the API allows a session one request per 0.7 s, three at most in a burst.
+# The dream client paces from its last 5 round trips and a session's first is slow, so until 5 replies are in, the
+# next chunk is asked for as each lands, at most once per WARMUP_GAP_S: the API allows one request per 0.7 s.
 WARMUP_REPLIES = 5
 WARMUP_GAP_S = 1.0
-# The model's server-side task planner makes its first plan 3.5 to 6.5 s after a session opens, proposing at most every
-# 1.5 s, and no reply says when a plan is in force. So a trial's first call asks again HOLD_ASKS times, HOLD_PERIOD_S
-# apart, the arms still, and plays the last reply, asked for 7.2 s after the first.
+# The task planner's first plan lands 3.5 to 6.5 s into a session and no reply says when, so a trial's first call
+# asks HOLD_ASKS more times, HOLD_PERIOD_S apart, the arms still, and plays the reply asked for 7.2 s after the first.
 HOLD_ASKS = 3
 HOLD_PERIOD_S = 2.4
 # Tells the model it drives a YAM and answers joint targets; grippers are 0 closed to 1 open, as the Client's.
@@ -56,10 +48,12 @@ YAM = {"robot.arm": "yam", "robot.exec_head": "joint", "robot.max_joint_vel_rad_
 
 
 def create_backend(options):
+    """Return the backend for the `dreamlabs` entry point."""
     return DreamLabsBackend(options)
 
 
 def _jpeg(rgb: np.ndarray) -> str:
+    """Return an RGB frame center-cropped to 16:9 and sized to FRAME_SIZE, as base64 JPEG."""
     import cv2
 
     height, width = rgb.shape[:2]
@@ -79,12 +73,14 @@ class DreamLabsBackend:
     """One trial's dream client session and the buffer of rows the arms have not run yet."""
 
     def __init__(self, options):
+        """Read the model's checkpoint from the backend options; the session opens in start_session()."""
         self.checkpoint = options["checkpoint"]
         if not isinstance(self.checkpoint, str) or not self.checkpoint:
             raise ValueError("dreamlabs backend requires a checkpoint, e.g. dreamlabs/dream-1-beta")
         self.client = None
 
     async def start_session(self, model: LocalModel, request) -> None:
+        """Check the model is a 14-D YAM joint model and open the trial's dream client session."""
         if model.action_space != "joint_position" or model.action_dim != 14 or model.control_hz != CONTROL_HZ:
             raise ValueError(f"dreamlabs backend requires 14-D YAM joint_position at {CONTROL_HZ} Hz")
         if model.max_horizon < ROWS_PER_CALL:
@@ -92,22 +88,22 @@ class DreamLabsBackend:
         import dream
 
         self.client = dream.DreamClient()
-        # action_hz turns the client's round trips into rows of the plan: for its prefetch timing and its seam.
+        # action_hz times the client's prefetch in rows of the plan.
         self.client.policy({"checkpoint": self.checkpoint, "strict": False, "action_hz": PLAN_HZ})
-        self.chunk = None  # (H, 14) the installed chunk's rows in Client order
-        self.chunk_at = 0.0  # plan time of the installed chunk's row 0
-        self.start = 0.0  # plan row of the installed chunk the arms took it over at
-        # Plan time, s: follows the wall clock while the arms play and stands still while they wait for a chunk.
-        self.clock = 0.0
-        self.clock_at = None  # wall time the plan clock was last moved; None while the arms wait
-        self.playing_s = 0.0  # wall time the arms have played this session
+        self.chunk = None  # (H, 14) rows in Client order
+        self.chunk_at = 0.0  # plan time of the chunk's row 0
+        self.start = 0.0  # the chunk's row the arms took it over at
+        self.clock = 0.0  # plan time, s: moves only while the arms play
+        self.clock_at = None  # wall time the plan clock last moved; None while the arms wait
+        self.playing_s = 0.0
         self.observed_at = 0.0  # wall time of the in-flight request's observation
-        self.observed_clock = 0.0  # plan time of the in-flight request's observation
-        self.last = None  # the last target returned: what the arms were last commanded
+        self.observed_clock = 0.0
+        self.last = None  # the target the arms were last commanded
         self.refill = None  # the in-flight get_action() task
-        self.replies = 0  # replies this session has received
+        self.replies = 0
 
     async def infer(self, model: LocalModel, observation: pb.Observation) -> np.ndarray:
+        """Return the targets of the Client's next ROWS_PER_CALL steps, requesting the next chunk when it is due."""
         now = time.monotonic()
         if self.clock_at is not None:  # the arms played the last call's targets
             self.clock += min(now - self.clock_at, MAX_ADVANCE_S)
@@ -135,6 +131,7 @@ class DreamLabsBackend:
         return actions
 
     async def end_session(self) -> None:
+        """Wait for the request in flight, print the playback rate and close the session."""
         if self.client is None:
             return
         if self.refill is not None:
@@ -147,6 +144,7 @@ class DreamLabsBackend:
         self.client = None
 
     def _wire(self, observation: pb.Observation):
+        """Return the model's frames and state for a Client observation; raise ValueError on a malformed one."""
         if not observation.instruction.strip():
             raise ValueError("observation instruction is empty")
         images = {image.sensor_id: image for image in observation.sensors}
@@ -162,7 +160,7 @@ class DreamLabsBackend:
         return frames, state
 
     async def _hold(self) -> None:
-        """Asks the model HOLD_ASKS more times with the first observation, HOLD_PERIOD_S apart; the arms stay still."""
+        """Ask the model HOLD_ASKS more times with the first observation, HOLD_PERIOD_S apart; the arms stay still."""
         started = time.monotonic()
         for _ in range(HOLD_ASKS):
             self._start_refill(time.monotonic())
@@ -176,13 +174,14 @@ class DreamLabsBackend:
         print(f"dreamlabs: held the first chunk {time.monotonic() - started:.1f} s for the planner", flush=True)
 
     def _start_refill(self, now: float) -> None:
-        # The joints each arm was last commanded: the new chunk takes over from the row after them.
+        """Request the next chunk in the background for the latest observation."""
+        # The new chunk takes over from the row after each arm's last commanded joints.
         commanded = None if self.last is None else {"q_l_chunk": self.last[:7].tolist(), "q_r_chunk": self.last[7:].tolist()}
         self.refill = asyncio.create_task(asyncio.to_thread(self.client.get_action, commanded=commanded))
         self.observed_at, self.observed_clock = now, self.clock
 
     def _targets(self) -> np.ndarray | None:
-        """The targets of the call's loop steps, between the rows due then; None once the chunk has run out."""
+        """Return the call's targets, interpolated between the rows due then; None once the chunk has run out."""
         if self.chunk is None:
             return None
         steps_s = np.arange(ROWS_PER_CALL) / CONTROL_HZ
@@ -196,7 +195,7 @@ class DreamLabsBackend:
         return self.chunk[below] + share * (self.chunk[above] - self.chunk[below])
 
     def _collect(self) -> None:
-        """Installs the in-flight chunk if it has landed, past the plan time the arms played since its observation."""
+        """Install the in-flight chunk if it has landed, skipping the rows the arms played since its observation."""
         if self.refill is None or not self.refill.done():
             return
         reply, self.refill = self.refill.result(), None
@@ -207,10 +206,8 @@ class DreamLabsBackend:
         chunk = np.concatenate([left, right], axis=1)  # left 6, left gripper, right 6, right gripper
         if not np.isfinite(chunk).all():
             raise ValueError("dream returned non-finite actions")
-        # The model's gripper rows can pass fully open or closed by a hair (1.004); the gripper's range is [0, 1].
-        chunk[:, [6, 13]] = np.clip(chunk[:, [6, 13]], 0, 1)
-        # Row k is the target k / PLAN_HZ s of plan time after the observation. Plan time moves only while the arms
-        # play, so the rows they played meanwhile are skipped and after a hold the plan resumes where they stopped.
+        chunk[:, [6, 13]] = np.clip(chunk[:, [6, 13]], 0, 1)  # gripper rows can pass [0, 1] by a hair
+        # Row k is due k / PLAN_HZ s of plan time after the observation; plan time moves only while the arms play.
         start = (self.clock - self.observed_clock) * PLAN_HZ
         if start > len(chunk) - 1:
             print(f"dreamlabs: discarding a chunk that landed after all {len(chunk)} of its rows were due", flush=True)
