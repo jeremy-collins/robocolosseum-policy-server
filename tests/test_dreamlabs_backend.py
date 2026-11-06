@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import dataclasses
 import sys
 import time
 import types
@@ -113,17 +114,22 @@ async def test_next_chunk_takes_over_from_the_last_commanded_row(monkeypatch):
                                  'q_r_chunk': pytest.approx([2 + .44 + .04 / 3] * 6 + [1])}
 
 
+@pytest.mark.parametrize('control_hz', [15, 30])
 @pytest.mark.asyncio
-async def test_plays_twenty_plan_rows_a_second_at_any_loop_rate(monkeypatch, capsys):
+async def test_plays_twenty_plan_rows_a_second_at_any_loop_rate(monkeypatch, capsys, control_hz):
     fake = FakeDreamClient()
     advance = fake_clock(monkeypatch)
-    backend = await started(monkeypatch, fake)
+    monkeypatch.setitem(sys.modules, 'dream', types.SimpleNamespace(DreamClient=lambda: fake))
+    monkeypatch.setattr(dreamlabs, 'HOLD_ASKS', 0)
+    at_rate = dataclasses.replace(model(), control_hz=control_hz)
+    backend = DreamLabsBackend({'checkpoint': 'dreamlabs/dream-1-beta'})
+    await backend.start_session(at_rate, {})
     played = []
-    for step in range(0, 30, 3):  # 1 s of a 30 Hz loop
-        played.append(await backend.infer(model(), observation(step)))
-        advance(0.1)
+    for step in range(0, 30, 3):  # 30 loop steps
+        played.append(await backend.infer(at_rate, observation(step)))
+        advance(3 / control_hz)
     await backend.end_session()
-    assert np.concatenate(played)[:, 0] == pytest.approx(1 + np.arange(30) * 20 / 30 / 100)  # rows 0 to 19.3, in 1 s
+    assert np.concatenate(played)[:, 0] == pytest.approx(1 + np.arange(30) * 20 / control_hz / 100)
     assert '20.0 rows/s' in capsys.readouterr().out
 
 
