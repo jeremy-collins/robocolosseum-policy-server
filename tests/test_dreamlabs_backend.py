@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import sys
+import time
 import types
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 
 from colosseum_policy_server import colosseum_pb2 as pb
 from colosseum_policy_server.backends.base import LocalModel
+from colosseum_policy_server.backends import dreamlabs
 from colosseum_policy_server.backends.dreamlabs import DreamLabsBackend
 from colosseum_policy_server.tensors import tensor_from_numpy
 
@@ -58,6 +60,7 @@ def observation(step):
 
 async def started(monkeypatch, fake):
     monkeypatch.setitem(sys.modules, 'dream', types.SimpleNamespace(DreamClient=lambda: fake))
+    monkeypatch.setattr(dreamlabs, 'STEERING_HOLD_S', 0.0)  # no first-call hold unless a test sets one
     backend = DreamLabsBackend({'checkpoint': 'dreamlabs/dream-1-beta'})
     await backend.start_session(model(), {})
     return backend
@@ -108,6 +111,33 @@ async def test_requests_each_chunk_on_arrival_until_five_replies_while_sync(monk
             await asyncio.wait({backend.refill})
     await backend.end_session()
     assert len(fake.commanded) == calls
+
+
+
+@pytest.mark.asyncio
+async def test_first_call_holds_the_arms_and_keeps_the_reply_asked_for_after_the_hold(monkeypatch):
+    fake = FakeDreamClient()
+    calls = []
+
+    def get_action(*, commanded=None):
+        calls.append(time.monotonic())
+        reply = FakeDreamClient.get_action(fake, commanded=commanded)
+        reply['q_l_chunk'][:, 0] += len(calls)  # tags each reply with its call number
+        return reply
+
+    fake.get_action = get_action
+    backend = await started(monkeypatch, fake)
+    monkeypatch.setattr(dreamlabs, 'STEERING_HOLD_S', 0.2)
+    monkeypatch.setattr(dreamlabs, 'HOLD_PERIOD_S', 0.05)
+    start = time.monotonic()
+    actions = await backend.infer(model(), observation(0))
+    assert time.monotonic() - start >= 0.2  # no rows reach the arms during the hold
+    assert len(calls) >= 4 and calls[-1] - start >= 0.2  # asked again meanwhile; the last asked after the hold
+    assert actions[:, 0] == pytest.approx([1 + len(calls), 1.01 + len(calls), 1.02 + len(calls)])  # the last reply
+    second = time.monotonic()
+    await backend.infer(model(), observation(3))
+    assert time.monotonic() - second < 0.1  # later calls do not hold
+    await backend.end_session()
 
 
 def joints(values):
