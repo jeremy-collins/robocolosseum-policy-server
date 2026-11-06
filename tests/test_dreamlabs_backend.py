@@ -60,7 +60,7 @@ def observation(step):
 
 async def started(monkeypatch, fake):
     monkeypatch.setitem(sys.modules, 'dream', types.SimpleNamespace(DreamClient=lambda: fake))
-    monkeypatch.setattr(dreamlabs, 'STEERING_HOLD_S', 0.0)  # no first-call hold unless a test sets one
+    monkeypatch.setattr(dreamlabs, 'HOLD_ASKS', 0)  # no first-call hold unless a test sets one
     backend = DreamLabsBackend({'checkpoint': 'dreamlabs/dream-1-beta'})
     await backend.start_session(model(), {})
     return backend
@@ -105,6 +105,7 @@ async def test_requests_each_chunk_on_arrival_until_five_replies_while_sync(monk
     fake = FakeDreamClient()
     fake.mode = mode
     backend = await started(monkeypatch, fake)
+    monkeypatch.setattr(dreamlabs, 'WARMUP_GAP_S', 0.0)
     for step in range(0, 30, 3):  # 30 rows: under the 45 that run before the buffer falls to 3
         await backend.infer(model(), observation(step))
         if backend.refill is not None:
@@ -127,17 +128,33 @@ async def test_first_call_holds_the_arms_and_keeps_the_reply_asked_for_after_the
 
     fake.get_action = get_action
     backend = await started(monkeypatch, fake)
-    monkeypatch.setattr(dreamlabs, 'STEERING_HOLD_S', 0.2)
+    monkeypatch.setattr(dreamlabs, 'HOLD_ASKS', 3)
     monkeypatch.setattr(dreamlabs, 'HOLD_PERIOD_S', 0.05)
     start = time.monotonic()
     actions = await backend.infer(model(), observation(0))
-    assert time.monotonic() - start >= 0.2  # no rows reach the arms during the hold
-    assert len(calls) >= 4 and calls[-1] - start >= 0.2  # asked again meanwhile; the last asked after the hold
-    assert actions[:, 0] == pytest.approx([1 + len(calls), 1.01 + len(calls), 1.02 + len(calls)])  # the last reply
+    assert time.monotonic() - start >= 0.15  # no rows reach the arms during the hold
+    assert len(calls) == 4  # the first ask and 3 more
+    assert min(b - a for a, b in zip(calls, calls[1:])) >= 0.05  # never faster than HOLD_PERIOD_S
+    assert actions[:, 0] == pytest.approx([5, 5.01, 5.02])  # rows of the 4th reply
     second = time.monotonic()
     await backend.infer(model(), observation(3))
     assert time.monotonic() - second < 0.1  # later calls do not hold
     await backend.end_session()
+
+
+
+@pytest.mark.asyncio
+async def test_warmup_waits_the_minimum_gap_between_requests(monkeypatch):
+    fake = FakeDreamClient()
+    fake.mode = 'sync'
+    backend = await started(monkeypatch, fake)
+    monkeypatch.setattr(dreamlabs, 'WARMUP_GAP_S', 10.0)
+    for step in range(0, 30, 3):
+        await backend.infer(model(), observation(step))
+        if backend.refill is not None:
+            await asyncio.wait({backend.refill})
+    await backend.end_session()
+    assert len(fake.commanded) == 1  # the warm-up never asked again inside the gap
 
 
 def joints(values):
