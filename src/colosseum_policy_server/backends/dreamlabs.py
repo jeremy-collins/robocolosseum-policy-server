@@ -4,6 +4,8 @@ The Client sends one observation per inference call and plays the returned rows 
 the model's frame window (9 frames at 5 fps) and fetches the next action chunk in the background while the arms play
 the current one, so a call normally returns a few rows from a local buffer and waits on the network only when the
 next chunk has not arrived yet. One trial is one model session: start_session() opens it and end_session() closes it.
+The trial's first call holds the arms still for STEERING_HOLD_S while it asks the model again, so the first rows the
+arms run already follow the plan of the model's server-side task planner, whose first plan takes about 5 s.
 
 The API key is read by the dream client itself, from `DREAM_API_KEY` or `~/.dreamlabs/credentials`.
 """
@@ -35,6 +37,11 @@ CAMERAS = {"head_image": "top", "left_image": "left", "right_image": "right"}
 # five round trips, and a session's first round trip is slow (the model opens the session). Until this many replies
 # have outvoted it, the next chunk is requested as soon as one lands, so the arms do not hold at the first chunk ends.
 WARMUP_REPLIES = 5
+# The model's server-side task planner makes its first plan about 5.3 s after a session opens and no reply says when
+# it is in force, so a trial's first call asks again every HOLD_PERIOD_S, the arms still, and keeps the first reply
+# requested this long after the session opened.
+STEERING_HOLD_S = 6.0
+HOLD_PERIOD_S = 0.5
 # Tells the model it drives a YAM and answers joint targets; grippers are 0 closed to 1 open, as the Client's.
 YAM = {"robot.arm": "yam", "robot.exec_head": "joint", "robot.max_joint_vel_rad_s": 0.0, "robot.gripper_open": 1.0}
 
@@ -89,6 +96,8 @@ class DreamLabsBackend:
         now = time.monotonic()
         self._collect(now)
         self.client.set_observation(*self._wire(observation), timestamp=now)
+        if self.replies == 0 and self.refill is None:
+            await self._hold(now)
         warming = self.replies < WARMUP_REPLIES and self.client.mode == "sync"
         due = not self.rows or warming or self.client.refill_due(self.installed - len(self.rows), len(self.rows))
         if self.refill is None and due:
@@ -126,6 +135,19 @@ class DreamLabsBackend:
                  "state.arm_l.joint_pos": joints[:6].tolist(), "state.arm_l.gripper_pos": grippers[:1].tolist(),
                  "state.arm_r.joint_pos": joints[6:].tolist(), "state.arm_r.gripper_pos": grippers[1:].tolist()}
         return frames, state
+
+    async def _hold(self, started: float) -> None:
+        """Asks the model again with the first observation until STEERING_HOLD_S has passed; the arms stay still."""
+        while True:
+            self._start_refill(time.monotonic())
+            await asyncio.wait({self.refill})
+            if self.observed_at - started >= STEERING_HOLD_S:  # this reply was asked for after the first plan
+                print(f"dreamlabs: held the first chunk {time.monotonic() - started:.1f} s for the planner", flush=True)
+                return
+            self.refill.result()  # an earlier reply is dropped, but a failed call still raises
+            self.refill = None
+            self.replies += 1
+            await asyncio.sleep(max(0.0, self.observed_at + HOLD_PERIOD_S - time.monotonic()))
 
     def _start_refill(self, now: float) -> None:
         # The joints each arm was last commanded: the new chunk takes over from the row after them.
