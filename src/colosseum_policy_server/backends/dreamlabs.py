@@ -31,6 +31,10 @@ FRAME_SIZE = (640, 360)
 JPEG_QUALITY = 85
 # Client camera -> the model's camera: the head camera and the left and right wrist cameras.
 CAMERAS = {"head_image": "top", "left_image": "left", "right_image": "right"}
+# The dream client decides between fetching ahead and waiting for each chunk to run out from the median of its last
+# five round trips, and a session's first round trip is slow (the model opens the session). Until this many replies
+# have outvoted it, the next chunk is requested as soon as one lands, so the arms do not hold at the first chunk ends.
+WARMUP_REPLIES = 5
 # Tells the model it drives a YAM and answers joint targets; grippers are 0 closed to 1 open, as the Client's.
 YAM = {"robot.arm": "yam", "robot.exec_head": "joint", "robot.max_joint_vel_rad_s": 0.0, "robot.gripper_open": 1.0}
 
@@ -79,12 +83,15 @@ class DreamLabsBackend:
         self.observed_at = 0.0
         self.last = None  # the last row returned: what the arms were last commanded
         self.refill = None  # the in-flight get_action() task
+        self.replies = 0  # replies this session has received
 
     async def infer(self, model: LocalModel, observation: pb.Observation) -> np.ndarray:
         now = time.monotonic()
         self._collect(now)
         self.client.set_observation(*self._wire(observation), timestamp=now)
-        if self.refill is None and (not self.rows or self.client.refill_due(self.installed - len(self.rows), len(self.rows))):
+        warming = self.replies < WARMUP_REPLIES and self.client.mode == "sync"
+        due = not self.rows or warming or self.client.refill_due(self.installed - len(self.rows), len(self.rows))
+        if self.refill is None and due:
             self._start_refill(now)
         while not self.rows:  # the first chunk, or a slow link: the arms hold until a chunk lands
             if self.refill is None:  # the last one landed too late to use
@@ -131,6 +138,7 @@ class DreamLabsBackend:
         if self.refill is None or not self.refill.done():
             return
         reply, self.refill = self.refill.result(), None
+        self.replies += 1
         left, right = np.asarray(reply["q_l_chunk"], np.float32), np.asarray(reply["q_r_chunk"], np.float32)
         if left.ndim != 2 or left.shape != right.shape or left.shape[1] != 7 or not len(left):
             raise ValueError(f"dream returned chunks of shapes {left.shape} and {right.shape}, not matching (H, 7)")
