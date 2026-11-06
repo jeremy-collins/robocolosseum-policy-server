@@ -1,13 +1,13 @@
 """Dream Labs backend: a Dream model on a bimanual YAM through the public `dreamlabs-client` library.
 
-The Client sends one observation per inference call and plays the returned targets at 30 Hz. The model's rows are
-played at PLAN_HZ, the rate Dream Labs' own YAM stations play them at, whatever the Client's rate: each call returns
-the targets for its next loop steps, interpolated between the rows due then. The dream client keeps the model's frame
-window (9 frames at 5 fps) and fetches the next action chunk in the background while the arms play the current one,
-so a call normally returns from the installed chunk and waits on the network only when the next chunk has not
-arrived yet. One trial is one model session: start_session() opens it and end_session() closes it.
-The trial's first call holds the arms still for about 7.5 s while it asks the model again, so the first rows the arms
-run already follow the plan of the model's server-side task planner, whose first plan takes 3.5 to 6.5 s.
+The Client sends one observation per inference call and plays the returned targets at its control rate, 30 Hz on a
+YAM. The model's rows are played at PLAN_HZ, the rate Dream Labs' own YAM stations play them at, whatever the Client's
+rate: each call returns the targets for its next loop steps, interpolated between the rows due then. The dream client
+keeps the model's frame window (9 frames at 5 fps) and fetches the next action chunk in the background while the arms
+play the current one, so a call normally returns from the installed chunk and waits on the network only when the next
+chunk has not arrived yet. One trial is one model session: start_session() opens it and end_session() closes it. The
+trial's first call holds the arms still for about 7.5 s while it asks the model again, so the first rows the arms run
+already follow the plan of the model's server-side task planner, whose first plan takes 3.5 to 6.5 s.
 
 The API key is read by the dream client itself, from `DREAM_API_KEY` or `~/.dreamlabs/credentials`.
 """
@@ -24,13 +24,10 @@ from .. import colosseum_pb2 as pb
 from ..model_adapters.bounds import check_bounds
 from ..model_adapters.observation import _rgb, _state
 
-CONTROL_HZ = 30
 # Model rows per second, as Dream Labs' YAM stations play them, ramping linearly from one row to the next.
 PLAN_HZ = 20
 # Targets per call: at 30 Hz, one observation every 0.1 s, twice the model's 5 fps frame window.
 ROWS_PER_CALL = 3
-# The most plan time one call may add, so a stalled Client resumes the plan where its arms stopped.
-MAX_ADVANCE_S = 2 * ROWS_PER_CALL / CONTROL_HZ
 # Frames are center-cropped to 16:9, never squished, then sized to FRAME_SIZE.
 FRAME_SIZE = (640, 360)
 JPEG_QUALITY = 85
@@ -81,12 +78,15 @@ class DreamLabsBackend:
 
     async def start_session(self, model: LocalModel, request) -> None:
         """Check the model is a 14-D YAM joint model and open the trial's dream client session."""
-        if model.action_space != "joint_position" or model.action_dim != 14 or model.control_hz != CONTROL_HZ:
-            raise ValueError(f"dreamlabs backend requires 14-D YAM joint_position at {CONTROL_HZ} Hz")
+        if model.action_space != "joint_position" or model.action_dim != 14:
+            raise ValueError("dreamlabs backend requires 14-D YAM joint_position")
         if model.max_horizon < ROWS_PER_CALL:
             raise ValueError(f"dreamlabs backend requires max_horizon of at least {ROWS_PER_CALL}")
         import dream
 
+        self.control_hz = model.control_hz
+        # The most plan time one call may add, so a stalled Client resumes the plan where its arms stopped.
+        self.max_advance_s = 2 * ROWS_PER_CALL / model.control_hz
         self.client = dream.DreamClient()
         # action_hz times the client's prefetch in rows of the plan.
         self.client.policy({"checkpoint": self.checkpoint, "strict": False, "action_hz": PLAN_HZ})
@@ -106,7 +106,7 @@ class DreamLabsBackend:
         """Return the targets of the Client's next ROWS_PER_CALL steps, requesting the next chunk when it is due."""
         now = time.monotonic()
         if self.clock_at is not None:  # the arms played the last call's targets
-            self.clock += min(now - self.clock_at, MAX_ADVANCE_S)
+            self.clock += min(now - self.clock_at, self.max_advance_s)
             self.playing_s += now - self.clock_at
         self._collect()
         self.client.set_observation(*self._wire(observation), timestamp=now)
@@ -184,7 +184,7 @@ class DreamLabsBackend:
         """Return the call's targets, interpolated between the rows due then; None once the chunk has run out."""
         if self.chunk is None:
             return None
-        steps_s = np.arange(ROWS_PER_CALL) / CONTROL_HZ
+        steps_s = np.arange(ROWS_PER_CALL) / self.control_hz
         rows = (self.clock - self.chunk_at + steps_s) * PLAN_HZ  # fractional plan rows, one per loop step
         rows = rows[rows <= len(self.chunk) - 1]
         if not len(rows):
